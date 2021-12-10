@@ -1,8 +1,16 @@
-import gzip
-import pandas as pd
 import os
+import gzip
+
+import matplotlib.pyplot as plt
+import pandas
+import pandas as pd
 from collections import defaultdict
+from scipy.stats import median_abs_deviation
+import json
+import sksurv
 from combat.pycombat import pycombat
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 
 
 def load_ann(path: str, keep_symbols: set, filtering: bool = True) -> tuple:
@@ -46,7 +54,12 @@ def load_ann(path: str, keep_symbols: set, filtering: bool = True) -> tuple:
     return id_name_map, name_len_df
 
 
-def load_tcga(path: str, id_name_map: dict, length_df: pd.DataFrame) -> pd.DataFrame:
+def load_tcga(
+        path: str,
+        id_name_map: dict,
+        patient_case_map: dict,
+        length_df: pd.DataFrame
+) -> pd.DataFrame:
     patients = pd.DataFrame(index=length_df.index.copy())
     # print(sorted(patients.index))
     # print("# of patients", len(patients.index))
@@ -67,7 +80,7 @@ def load_tcga(path: str, id_name_map: dict, length_df: pd.DataFrame) -> pd.DataF
         add_name_index(df, id_name_map)
         df.drop(columns="gene_id", inplace=True)
         tpm_normalize(df, length_df)
-        patients[patient] = df["tpm"]
+        patients[patient_case_map[patient]] = df["tpm"]
     return patients
 
 
@@ -97,11 +110,34 @@ def load_icgc(path: str, id_name_map: dict, length_df: pd.DataFrame, keep_symbol
         #     print(df2.head())
         # exit()
         df.set_index("gene_name", inplace=True)
+        if len(df.index) > 2600:
+            print(patient, len(df.index))
         tpm_normalize(df, length_df)
         if df.isnull().values.any():
             print("patient")
         patients[patient] = df["tpm"]
+        if patients.isnull().values.any():
+            continue
+            print(patient)
+            patients.dropna(axis=1, inplace=True)
+    # print(len(patients[patients.isnull()].index.tolist()))
     return patients
+
+
+def load_meta_tcga(path):
+    with open(path, 'r') as inf:
+        return {it["file_id"]: it["associated_entities"][0]["case_id"]
+                for it in json.load(inf)}
+
+
+def load_clinical(path):
+    return
+    df = pd.read_csv(
+        path,
+        sep="\t",
+        #  index_col=["icgc_sample_id", "gene_id"],
+        # usecols=keep_columns
+    )
 
 
 def remove_nameless_ids(df: pd.DataFrame, id_name_map: dict) -> None:
@@ -121,8 +157,8 @@ def remove_id_column(df: pd.DataFrame) -> None:
 
 def tpm_normalize(df: pd.DataFrame, lengths_df: pd.DataFrame):
     rpk_df = df["raw_read_count"] / lengths_df["length"]
-    scaling_factor = rpk_df.sum() / 1000000
-    df["tpm"] = rpk_df * scaling_factor
+    scaling_factor = rpk_df.count() / 1000000
+    df["tpm"] = rpk_df / scaling_factor
     df.drop(columns="raw_read_count", inplace=True)
 # TODO je li filtering usklađen sa anotacijama remove nameless ids
 
@@ -142,6 +178,18 @@ def load_metabolyc_genes(path: str) -> set:
     # zasto je SLC25A25 dupliciran?
 
 
+def relevant_genes(path: str):
+    return set(
+        pd.read_excel(path, sheet_name="Table S1", header=1)["Gene Symbol"]
+    )
+
+
+def mad(df: pd.DataFrame, threshold: float) -> None:
+    df.drop(df.loc[df.apply(
+        median_abs_deviation, axis=1, raw=True
+    ) <= threshold].index, inplace=True)
+
+
 if __name__ == "__main__":
     ANNOTATIONS_FILE = "../res/gencode.v22.annotation.gtf.gz"
     METABOLYC_FILE = "../res/41586_2011_BFnature10350_MOESM321_ESM.xls"
@@ -149,22 +197,43 @@ if __name__ == "__main__":
     ICGC_FILE = "../res/icgc-dataset-1638970984337/exp_seq.tsv.gz"
     TCGA_CLEANED = "../res/tcga.csv"
     ICGC_CLEANED = "../res/icgc.csv"
+    TCGA_META = "../res/metadata.cart.2021-12-10.json"
+    TCGA_CLINICAL = "../res/clinical.cart.2021-12-08/clinical.tsv"
+    RELEVANT_GENES = "../res/mol212639-sup-0006-tables1-s11.xlsx"
 
-    if os.path.isfile(TCGA_CLEANED) and os.path.isfile(ICGC_CLEANED):
+    if os.path.isfile(TCGA_CLEANED): # and os.path.isfile(ICGC_CLEANED):
         tcga = pd.read_csv(TCGA_CLEANED, index_col=0)
-        icgc = pd.read_csv(ICGC_CLEANED, index_col=0)
+        # icgc = pd.read_csv(ICGC_CLEANED, index_col=0)
     else:
         mg = load_metabolyc_genes(METABOLYC_FILE)
+        mt = load_meta_tcga("../res/metadata.cart.2021-12-10.json")
         inm, ld = load_ann(ANNOTATIONS_FILE, mg)
 
-        tcga = load_tcga(TCGA_FOLDER, inm, ld)
+        tcga = load_tcga(TCGA_FOLDER, inm, mt, ld)
         icgc = load_icgc(ICGC_FILE, inm, ld, mg)
-        print(set(icgc.index) - set(tcga.index))
         tcga.to_csv(TCGA_CLEANED)
-        icgc.to_csv(ICGC_CLEANED)
+        # icgc.to_csv(ICGC_CLEANED)
 
-    tcga.dropna(axis=1, inplace=True)
-    icgc.dropna(axis=1, inplace=True)
+    # mad(tcga, 0.5)
+    load_clinical(TCGA_CLINICAL)
+    rg = relevant_genes(RELEVANT_GENES)
+    X = tcga[tcga.index.isin(rg)]
+    print(len(rg))
+    print(X)
+    kmeans = KMeans(3, random_state=42).fit(X)
+    results = pandas.DataFrame(data=kmeans.labels_, columns=["cluster"], index=X.index).groupby("cluster")
+
+    reduced = PCA(2, random_state=42).fit_transform(X)
+    # print("r", reduced)
+    plt.figure()
+    for name, result in results:
+        # print(name, X.index)
+        # print(reduced[X.index.isin(result.index)])
+        plt.scatter(*reduced[X.index.isin(result.index)].T)
+    plt.show()
+    # print(tcga.head())
+    # icgc.dropna(axis=1, inplace=True)
+    # print(icgc.iloc[:20])
     # total = pd.concat([tcga, icgc], join="inner", axis=1)
     # batch = [0] * len(tcga.columns) + [1] * len(icgc.columns)
     # data_corrected = pycombat(total, batch)
