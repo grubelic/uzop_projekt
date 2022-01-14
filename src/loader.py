@@ -191,6 +191,7 @@ def mad(df: pd.DataFrame, threshold: float) -> None:
 
 
 if __name__ == "__main__":
+    exit(0)
     ANNOTATIONS_FILE = "../res/gencode.v22.annotation.gtf.gz"
     METABOLYC_FILE = "../res/41586_2011_BFnature10350_MOESM321_ESM.xls"
     TCGA_FOLDER = "../res/gdc_download_20211208_083143.349897"
